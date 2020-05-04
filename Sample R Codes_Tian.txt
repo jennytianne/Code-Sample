@@ -1,0 +1,208 @@
+# Author: Jenny Tian
+# Date: 11.07.2019
+# Program Name: Sample R Codes.Tian.R
+# Description: Subjective Wellbeing Analysis: 
+# cleaning, merging, regressions and scatterplots 
+
+
+############# Preparatory #############
+
+#install.packages("cowplot")
+library("knitr")
+library("bookdown")
+library("class")
+library("dplyr")
+library("tidyr")
+library("ggplot2")
+library("cowplot")
+library("ggthemes")
+library("scales")
+library("jtools")
+library("huxtable")
+library("sandwich")
+library("boot")
+library("tidyverse")
+library("readxl")
+library("foreign")
+
+
+# Clear Environment and Set File Path
+rm(list=ls())
+pathname <- "C:/Users/zhenying.tian/Downloads/R/Coursera JHU Programming/Behavioral"
+setwd(pathname)
+
+
+############# Import and Clean Ratings data #############
+
+# Import data 
+rate <- read.csv("ratings.csv", header = T)
+#summary(rate)
+
+# unique number of respondants and aspects 
+apply(rate[,c(1,2)], 2, n_distinct)
+
+
+## Drop duplicates: keep the most recent rating per worker and aspect
+# Rank obs by time within each worker and aspect 
+# Rank 1 indicates the most recent obs
+require(dplyr)
+rate1 <- rate %>% 
+        group_by(worker, aspect) %>% 
+        mutate(rank = order(order(worker, aspect, time, decreasing = T)))
+
+rate1 <- rate1[order(rate1$worker, rate1$aspect, -rate1$time),]
+
+# Subset ratings to only the most recent obs per worker-aspect 
+rate2 <- rate1[rate1$rank ==1,]
+
+# num of obs dropped 
+nrow(rate1) - nrow(rate2)
+
+############# Subjective Riches #############
+
+# Average rating for each respondant 
+avg_rate <- rate2 %>% 
+        group_by(worker) %>% 
+        summarize(subjective_riches = mean(rating))
+
+# merge average ratings to rate2
+rate3 <- left_join(rate2, avg_rate, by = "worker")
+
+# Report summary stats of average ratings
+summary(avg_rate$subjective_riches)
+
+
+
+############# Import and Merge Demograhpics data with Subjective Riches #############
+
+# Import data 
+demo <- read.csv("demographics.csv", header = T)
+#summary(rate)
+
+# number of rows compared to unique number of respondants in ratings data
+nrow(demo)
+
+# Merge subjective riches to demographics 
+demo <- left_join(demo, avg_rate, by = "worker")
+
+
+
+############# Regressions #############
+
+# Model 1: simple regression 
+lm.d<- lm(subjective_riches ~ income, data = demo)
+
+# One obs has no education => dropped from regression data 
+demo <- demo[demo$education != "", ]
+
+# change qualitative variables to factor 
+demo$education <- as.factor(demo$education)
+demo$race <- as.factor(demo$race)
+
+# Model 2: multiple regression
+lm.e<- lm(subjective_riches ~ income+age+I(age^2)+male+education+race,data = demo)
+
+# output regression results 
+export_regs <- huxreg("Model 1" = lm.d, "Model 2" = lm.e, number_format = "%.4f",
+                       statistics = c('# observations' = 'nobs', 
+                                      'Adjusted R Squared' ='adj.r.squared', 
+                                      'F statistic' = 'statistic',
+                                      'P value' = 'p.value', 'AIC'),
+                       note = 'Linear regressions of Subjective Riches. {stars}.')
+ 
+
+# format regression table
+suppressPackageStartupMessages(library(dplyr))
+export_regs                                                         %>% 
+      theme_article                                                  %>% 
+      set_background_color(1:nrow(export_regs), evens, grey(.95))    %>% 
+      set_font_size(final(), 1, 9)                                   %>% 
+      set_bold(final(), 1, FALSE)                                    %>%
+      set_top_border(final(), 1, 1)                                  %>%
+      set_caption('Linear regressions of Subjective Riches') %>% 
+      set_font("times")
+
+
+############# Scatterplots of health vs. age and income #############
+
+## physical health
+physical_health <- data.frame("Physical Health" = matrix(unique(rate3$aspect)[c(5,12,15)]))
+kable(physical_health)
+
+
+## mental health
+mental_health <- data.frame("Mental Health" = matrix(unique(rate3$aspect)[c(1,3,4,10,11,14,5)]))
+both_health <-  data.frame("Mental Health" = matrix(unique(rate3$aspect)[c(1,3,4,10,11,14,5,12,15)]))
+kable(mental_health)
+
+
+# Average ratings of health 
+physical_health$physical <- 1 
+rate3 <- left_join(rate3, physical_health, by = c("aspect" = "Physical.Health"))
+
+both_health$both <- 1 
+rate3 <- left_join(rate3, both_health, by = c("aspect" = "Mental.Health"))
+
+avg_physical_health <- rate3[rate3$physical  ==1,] %>% 
+        group_by(worker) %>% 
+        summarize(physical_health = mean(rating))
+
+avg_both_health <- rate3[rate3$both  ==1,] %>% 
+        group_by(worker) %>% 
+        summarize(both_health = mean(rating))
+
+# Merge Average ratings of health to demo 
+demo <- left_join(demo, avg_both_health, by = "worker")
+demo <- left_join(demo, avg_physical_health, by = "worker")
+
+
+
+## plots
+plot1 <- ggplot(demo, aes(x= income, y = physical_health, color = age ))+
+        geom_point()+
+        # geom_abline(intercept = intercept5, slope = coef(lm.fit)[[2]], color = "red")+
+        scale_x_continuous(name = "Household Income (USD)" ,breaks = seq(10000,275000,60000))+
+        scale_y_continuous(name = "Physical Health Ratings")+
+        labs(title = "Physical Health Ratings" , 
+                subtitle = "by Age and Household Income", 
+             caption = "Source: Survey of 1,056 respondants.")+
+        theme_hc()
+
+plot2 <- ggplot(demo, aes(x= income, y = both_health, color = age ))+
+        geom_point()+
+        # geom_abline(intercept = intercept5, slope = coef(lm.fit)[[2]], color = "red")+
+        scale_x_continuous(name = "Household Income (USD)" ,breaks = seq(10000,275000,60000))+
+        scale_y_continuous(name = "Physical and Mental Health Ratings")+
+        labs(title = "Physical and Mental Health Ratings" , 
+                subtitle = "by Age and Household Income", 
+             caption = "Source: Survey of 1,056 respondants.")+
+        theme_hc()
+
+plot_grid(plot1, plot2, labels =  c("1.A", "1.B"))
+ 
+
+plot3 <- ggplot(demo, aes(x= age, y = physical_health, color = income ))+
+        geom_point()+
+        # geom_abline(intercept = intercept5, slope = coef(lm.fit)[[2]], color = "red")+
+       scale_x_continuous(name = "Age" ,breaks = seq(20,75,5))+
+        scale_y_continuous(name = "Physical Health Ratings")+ 
+        labs(title = "Physical Health Ratings" , 
+                subtitle = "by Age and Household Income", 
+             caption = "Source: Survey of 1,056 respondants.")+
+        theme_hc()
+
+plot4 <- ggplot(demo, aes(x= age, y = both_health, color = income  ))+
+        geom_point()+
+        # geom_abline(intercept = intercept5, slope = coef(lm.fit)[[2]], color = "red")+
+       scale_x_continuous(name = "Age" ,breaks = seq(20,75,5))+
+        scale_y_continuous(name = "Physical and Mental Health Ratings")+ 
+        labs(title = "Physical and Mental Health Ratings" , 
+                subtitle = "by Age and Household Income", 
+             caption = "Source: Survey of 1,056 respondants.")+
+        theme_hc()
+
+
+plot_grid(plot3, plot4, labels = c("2.A", "2.B"))
+
+
+

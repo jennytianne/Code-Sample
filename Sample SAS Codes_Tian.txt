@@ -1,0 +1,179 @@
+/***************************************************************************
+Description of Analysis: Reshape Transaction dataset to reallocate total bookings 
+for multi-year contracts across individual years to get yearly bookings
+
+Creator: Jenny Tian
+Start Date: 3/27/2019 
+***************************************************************************/
+/* proc datasets lib=work kill noprint; quit; */
+
+dm log 'clear';
+
+%let path = \\owg.ds.corp\serverfarm\Antitrust\SOCRATES ACQUIRE (113087);
+%let raw = &path.\Raw Data;
+%let export = &path.\Output;
+%let lookups = &path.\Lookups;
+libname data "&path.\SAS Data";
+
+options mprint mlogic symbolgen errors=5 compress=yes;
+
+
+***************************************************************************/
+Import Data; 
+***************************************************************************/; 
+
+proc import 
+	datafile = "&raw.\Consolidated transaction data.csv" 
+	out = tran_1 
+	dbms = csv replace ; 
+	guessingrows = max; 
+run; 
+
+***************************************************************************/
+Data Preparation
+***************************************************************************/; 
+
+* Extract the variable names ;
+proc sql noprint;
+      select distinct name
+      into :variable separated by " "
+      from dictionary.columns
+	where libname="WORK" and memname="TRAN_1" and lowcase(name) not in ("fiscal_year", "start_date", "end_date" , "close_date");
+quit;
+
+%put &variable.;  
+
+* Generate the start and end date of each contract; 
+data tran_2; 
+	retain &variable. fiscal_year start_date end_date close_date ; 
+	set tran_1; 
+	if month(start_date) in (1, 2) then f_start_year = year(start_date); 
+	else f_start_year = year(start_date) + 1; 
+	if month(end_Date) in (1, 2) then f_end_year = year(end_date); 
+	else f_end_year = year(end_date) + 1; 
+	years = f_end_year - f_start_year + 1; 
+	N = _N_; 
+run;  
+
+* Observations with single-year contract => no need to reshape total bookings;
+data K_single; 
+	set tran_2; 
+	where f_start_year = f_end_year; 
+	transaction_fy = f_start_year; 
+	yrly_tb = tb; 
+run; 
+
+* Observations with multi-year contract; 
+data tran_3; 
+	set tran_2; 
+	where f_start_year ne f_end_year; 
+run; 
+
+
+/*** Create a mini-subset to test codes; */
+/*data tran_3; */
+/*set tran_2; */
+/*where years in ( 2,3); */
+/*if N<50; */
+/*run; */
+
+* Extract number of years of each contract; 
+proc sql noprint; 
+	select count(distinct years) into : num 
+	from tran_3; 
+quit; 
+
+%put &num.; 
+
+* Extract the years of each contract into years1-years10; 
+proc sql noprint; 
+	select distinct years into : years1 - 
+	from tran_3 ; 
+quit; *10 rows; 
+
+%put &years1; 
+
+
+***************************************************************************/
+Automatic Loop: Reshaping Total Bookings Across the Length of the Contract
+***************************************************************************/; 
+
+%macro num_loop(number); 
+	%do n = 1 %to &number.; 
+		%macro loop(a);; 
+		    data H_&&years&a.; 
+			set tran_3;   
+			where years = &&years&a.;  
+			%do i = 1 %to &&years&a.;
+			if &i. = 1 then x&i. = "X_&i.";  
+			if &i. = 2 then x&i. = "X_&i.";  
+			if &i. = 3 then x&i. = "X_&i.";  
+			if &i. = 4 then x&i. = "X_&i.";  
+			if &i. = 5 then x&i. = "X_&i.";  
+			if &i. = 6 then x&i. = "X_&i.";  
+			if &i. = 7 then x&i. = "X_&i."; 
+			if &i. = 8 then x&i. = "X_&i."; 
+			if &i. = 9 then x&i. = "X_&i."; 
+			if &i. = 10 then x&i. = "X_&i."; 
+			if &i. = 11 then x&i. = "X_&i."; 	
+			if &i. = 12 then x&i. = "X_&i."; 	
+			if &i. = 13 then x&i. = "X_&i."; 	
+			if &i. = 14 then x&i. = "X_&i."; 	
+			if &i. = 15 then x&i. = "X_&i."; 	
+			%end; 
+			run; 
+
+			%sort(H_&&years&a., &variable. fiscal_year start_date end_date close_date f_start_year f_end_year years N ); 
+
+			proc transpose 
+				data = H_&&years&a. 
+				out = I_&&years&a.; 
+				by &variable. fiscal_year start_date end_date close_date f_start_year f_end_year years N ; 
+				var x:; 
+			run; 
+
+
+			data J_&&years&a.; 
+			set I_&&years&a.; 
+			count + 1; 
+			by &variable. fiscal_year start_date end_date close_date f_start_year f_end_year years N ; 
+			if first.start_date and first.end_date and first.N then count = 0; 
+			run; 
+
+
+			data K_&&years&a.; 
+			set J_&&years&a.; 
+			transaction_fy = count + f_start_year;   
+			if transaction_fy = f_end_year then days = end_Date - mdy(3,1,transaction_fy-1) + 1;  
+			else if transaction_fy = f_start_year then days = mdy(3, 1, transaction_fy) - start_date ; 
+			else days = mdy(3,1,transaction_fy) - mdy(3,1, transaction_fy - 1); 
+			contract_term  = end_date - start_date + 1; 
+			yrly_tb = days / contract_term * tb; 
+			run;  
+
+		%mend;  
+		%loop(&n.); 
+	%end; 
+%mend; 
+
+%num_loop(&num.); 
+
+
+* Drop intermediary variables; 
+data F; 
+	set K: ; 
+	drop f_start_year -- count days contract_term; 
+run; 
+
+
+***************************************************************************/
+Export Data
+***************************************************************************/; 
+
+data data.reshaped_transaction_data; 
+	set F; 
+run; 
+
+
+
+

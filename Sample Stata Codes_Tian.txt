@@ -1,0 +1,199 @@
+/***************************************************************************
+Project Name: OFFICE EXIT 
+
+Description of Analysis: 
+1. Import Staples monthly price data (OUT files) and save out as dta files
+2. Data Cleaning and flag creating: limiting to SKUs carried only in common with 
+Merging Competitor or only in common with a third party brick-and-mortar competitor
+3. Run a diff-in-diff pricing analysis to test whether SKUs carried only in common
+with Merging Competitor have higher pricing premiums in more expensive price zones
+compared to SKUs only carried in common with a third party competitor. 
+
+Creator: Jenny Tian
+Start Date: 10/8/2019
+Completion Date: 10/9/2019
+Checker (if applicable):
+Date Checking Completed (if applicable):
+
+***************************************************************************/
+
+
+global path = "\\owg.ds.corp\serverfarm\Antitrust\OFFICE EXIT (114162)\Data"
+cd "$path"
+global raw = "Raw"
+global stata_unmerged = "Intermediate\Price Data - Second Pull\Unmerged"
+global stata_merged = "Intermediate\Price Data - Second Pull\Merged"
+global stata_cleaned = "Intermediate\Price Data - Second Pull\Cleaned"
+ 
+set more off		
+set type double
+clear 			
+program drop _all
+
+global m1 = "jan" 
+global m2 = "feb" 
+global m3 = "mar" 
+global m4 = "apr" 
+global m5 = "may" 
+global m6 = "jun" 
+global m7 = "jul" 
+global m8 = "aug" 
+global m9 = "sep" 
+global m10 = "oct" 
+global m11 = "nov" 
+global m12 = "dec" 
+
+
+
+/***************************************************************************
+Import and Save Monthly Price Data
+***************************************************************************/
+
+foreach y in 2016 2017 2018{
+forvalue i=1/12{
+insheet using "$raw\Price Data - Second Pull\\${m`i'} `y'\f_postd_dly_sls_rtl_ff.out",///
+delimiter("|") clear 
+saveold "$stata_unmerged\price_${m`i'}_`y'.dta", version(12) replace
+}
+}
+
+foreach y in 2019{
+forvalue i=1/9{
+insheet using "$raw\Price Data - Second Pull\\${m`i'} `y'\f_postd_dly_sls_rtl_ff.out", ///
+delimiter("|") clear 
+saveold "$stata_unmerged\price_${m`i'}_`y'.dta", version(12) replace
+}
+}
+
+/***************************************************************************
+Append all monthly price data to get full time period 2016-2019
+***************************************************************************/
+global unmergedfiles : dir "$stata_unmerged" files "*.dta" 
+di $unmergedfiles 
+
+local first_loop yes
+
+foreach f of global unmergedfiles {
+	use "$stata_unmerged\\`f'",  clear
+	* create a yearmonth variable
+	gen source = "`f'"	
+	replace source = substr(source, 1, strlen(source)-4)
+	split source, parse("_") 
+	gen date_string = source2 + source3
+	gen yearmonth = mofd(date(date_string, "MY"))
+	format yearmonth %tm
+
+	if "`first_loop'" == "yes" {
+		save "$stata_merged\price_cost_competitor.dta", replace 
+		local first_loop no
+	}
+	else {
+		append using "$stata_merged\price_cost_competitor.dta" 
+		saveold "$stata_merged\price_cost_competitor.dta", version(12) replace 
+	}
+}
+
+
+/***************************************************************************
+Create flags for diff-in-diff analyses 
+***************************************************************************/
+use "$stata_merged\price_cost_competitor.dta" , clear 
+
+* drop irrelevant variables 
+keep sls_pdt_id sls_locn_id net_sls_amt net_sls_qty adjd_cst_amt month - tgt_com_match
+
+* create transaction price and cost per unit (and logs)
+gen transaction_sales_price = net_sls_amt / net_sls_qty
+gen adjd_cst_per_unit = adjd_cst_amt / net_sls_qty
+gen log_price = log(transaction_sales_price)
+gen log_cost = log(adjd_cst_per_unit)
+
+* flag price outliers
+ foreach x in transaction_sales_price {
+  quietly bysort sls_pdt_id: egen p1_`x' = pctile(`x') if `x' >= 0, p(1)
+  quietly bysort sls_pdt_id: egen p99_`x' = pctile(`x') if `x' >= 0, p(99)
+  gen l_`x' = p1_`x'*.67
+  gen u_`x' = p99_`x'*1.5
+  }
+ 
+ foreach x in transaction_sales_price {
+ gen `x'_outlier = 0
+ replace `x'_outlier = 1 if `x' <= 0 | missing(`x') | `x' < l_`x' | `x' > u_`x' | `x' < adjd_cst_per_unit
+ }   
+              
+ drop p1* p99* l_* u_*
+
+
+* flag gift cards, as gift cards should have no price variations across stores
+gen flag_gift_card =(pdt_dept_dscr == "GIFT CARDS")
+
+* flag SKUs only carried in common with Merging Competitor 
+gen third_match = "NO"
+replace third_match = "YES" if tgt_match == "YES" | bby_match == "YES" | ///
+sam_match == "YES" | cos_match == "YES" | wmt_match == "YES"  
+gen flag_only_odp = (odp_match == "YES"  & third_match == "NO")
+
+* flag SKUs only carried in common with any other third party brick-and-mortar
+gen flag_only_third = (third_match == "YES" & odp_match == "NO")
+
+saveold "$stata_cleaned\price_cost_competitor.dta" , replace version(12)
+
+
+/***************************************************************************
+Data Cleaning: drop outliers
+***************************************************************************/
+drop if odp_match == "" 
+drop if transaction_sales_price_outlier == 1 
+drop if adjd_cst_per_unit <= 0 
+drop if transaction_sales_price < adjd_cst_per_unit
+drop if flag_gift_card == 1
+
+* limiting to SKUs either carried only by Competitor or only by third party
+keep if flag_only_odp == 1 | flag_only_third == 1
+
+
+/***************************************************************************
+Diff-in-Diff Regressions
+***************************************************************************/
+log using "$output\Diff-in-Diff of SKUs with Only MC and SKUs with only Third Party Rivals.txt", text replace
+
+* regresss sales price on price zone, dummy for SKUs only in common with Competitor and cost 
+reg transaction_sales_price i.zone flag_only_odp adjd_cst_per_unit  
+est store V1
+reg log_price i.zone flag_only_odp log_cost   
+est store V2
+
+* add zone*flag_only_comp interaction terms
+reg transaction_sales_price zone##flag_only_odp adjd_cst_per_unit 
+est store V3 
+reg log_price zone##flag_only_odp log_cost 
+est store V4
+
+log close 
+
+
+/***************************************************************************
+Export Regression Results to Excel
+***************************************************************************/
+estout V* using tmp_reg.xls, replace cells("b(star fmt(%12.6f))" "se(par([ ]) fmt(%12.6f)) ") ///
+stats(depvar r2 r2_a N df_m, fmt(%12.6f %12.6g )) starlevel(* 0.10 ** 0.05 *** 0.01) stardetach
+preserve
+insheet using tmp_reg.xls, clear tab
+export excel using "Diff-in-Diff of SKUs with Only MC and SKUs with only Third Party Rivals.xlsx",///
+sheetreplace sheet("Stata Output") firstrow(variables)
+erase tmp_reg.xls
+restore
+
+
+
+
+
+
+
+
+
+
+
+
+
+
